@@ -22,11 +22,67 @@
 #import "CDVOrientation.h"
 #import <Cordova/CDVViewController.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
+
+// ---------------------------------------------------------------------------
+// cordova-ios 8.0 compatibility shim
+//
+// cordova-ios 8.0 removed setSupportedOrientations: and the corresponding
+// supportedInterfaceOrientations override from CDVViewController.  Without
+// these the view controller always reports "all orientations" to UIKit, which
+// causes setNeedsUpdateOfSupportedInterfaceOrientations (called after
+// requestGeometryUpdateWithPreferences:) to immediately undo the geometry
+// preference we just set.
+//
+// The fix: swizzle -[CDVViewController supportedInterfaceOrientations] at
+// +load time so we can store and return a restricted orientation mask via an
+// associated object – exactly what setSupportedOrientations: used to do.
+// ---------------------------------------------------------------------------
+
+/// Associated-object key for the active UIInterfaceOrientationMask (NSNumber).
+static char kCDVOrientationMaskKey;
+
+/// Original IMP of -[CDVViewController supportedInterfaceOrientations].
+static IMP _cdvOriginalSupportedOrientations = NULL;
+
+/**
+ * Swizzled replacement for -[CDVViewController supportedInterfaceOrientations].
+ * Returns the mask stored by this plugin when an orientation lock is active,
+ * otherwise falls through to the original implementation.
+ */
+static UIInterfaceOrientationMask CDVOrientation_supportedInterfaceOrientations(id self, SEL _cmd) {
+    NSNumber *mask = objc_getAssociatedObject(self, &kCDVOrientationMaskKey);
+    if (mask) {
+        return [mask unsignedIntegerValue];
+    }
+    if (_cdvOriginalSupportedOrientations) {
+        return ((UIInterfaceOrientationMask (*)(id, SEL))_cdvOriginalSupportedOrientations)(self, _cmd);
+    }
+    return UIInterfaceOrientationMaskAll;
+}
 
 @interface CDVOrientation () {}
 @end
 
 @implementation CDVOrientation
+
++ (void)load {
+    // Only swizzle when setSupportedOrientations: is absent (cordova-ios 8.0+).
+    Class vcClass = NSClassFromString(@"CDVViewController");
+    if (!vcClass) return;
+    if ([vcClass instancesRespondToSelector:NSSelectorFromString(@"setSupportedOrientations:")]) {
+        return; // cordova-ios < 8.0 – legacy path handles orientation
+    }
+
+    SEL targetSel = @selector(supportedInterfaceOrientations);
+    Method method = class_getInstanceMethod(vcClass, targetSel);
+    if (method) {
+        _cdvOriginalSupportedOrientations = method_getImplementation(method);
+        class_replaceMethod(vcClass, targetSel,
+                            (IMP)CDVOrientation_supportedInterfaceOrientations,
+                            method_getTypeEncoding(method));
+    }
+}
 
 
 -(void)handleBelowEqualIos15WithOrientationMask:(NSInteger) orientationMask viewController: (CDVViewController*) vc result:(NSMutableArray*) result selector:(SEL) selector
@@ -92,8 +148,6 @@
             ((void (*)(CDVViewController*, SEL, NSMutableArray*))objc_msgSend)(vc,selector,result);
         }
         // On iOS 16+, explicitly request all orientations to truly unlock.
-        // Without this, cordova-ios 8.0 would silently fail because
-        // setSupportedOrientations: no longer exists on CDVViewController.
         value = [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:UIInterfaceOrientationMaskAll];
     }
     if (value != nil) {
@@ -135,7 +189,7 @@
     NSInteger orientationMask = [[command argumentAtIndex:0] integerValue];
     CDVViewController* vc = (CDVViewController*)self.viewController;
     NSMutableArray* result = [[NSMutableArray alloc] init];
-    
+
     if(orientationMask & 1) {
         [result addObject:[NSNumber numberWithInt:UIInterfaceOrientationPortrait]];
     }
@@ -150,11 +204,29 @@
     }
     SEL selector = NSSelectorFromString(@"setSupportedOrientations:");
 
-    // Call setSupportedOrientations: only if CDVViewController still supports it
-    // (cordova-ios < 8.0). On cordova-ios 8.0+ this method was removed.
     if([vc respondsToSelector:selector]) {
+        // cordova-ios < 8.0: use the legacy API
         if (orientationMask != 15 || [UIDevice currentDevice] == nil) {
             ((void (*)(CDVViewController*, SEL, NSMutableArray*))objc_msgSend)(vc,selector,result);
+        }
+    } else {
+        // cordova-ios 8.0+: store the UIInterfaceOrientationMask as an associated
+        // object on the CDVViewController so our swizzled
+        // supportedInterfaceOrientations returns the restricted set.  This ensures
+        // requestGeometryUpdateWithPreferences: (iOS 16+) is not overridden when
+        // setNeedsUpdateOfSupportedInterfaceOrientations re-queries the VC.
+        if (orientationMask == 15) {
+            // Unlock: remove the override so the original implementation is used.
+            objc_setAssociatedObject(vc, &kCDVOrientationMaskKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        } else {
+            // Build UIInterfaceOrientationMask from the result array.
+            // Each entry is a UIInterfaceOrientation enum value; the corresponding
+            // mask bit is (1 << enumValue).
+            UIInterfaceOrientationMask uiMask = 0;
+            for (NSNumber *orientation in result) {
+                uiMask |= (1 << [orientation integerValue]);
+            }
+            objc_setAssociatedObject(vc, &kCDVOrientationMaskKey, @(uiMask), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
     }
 
@@ -163,9 +235,9 @@
     }
 
     pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
-    
+
     [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
-    
+
 }
 
 @end
