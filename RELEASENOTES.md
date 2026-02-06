@@ -21,6 +21,12 @@
 
 # Release Notes
 
+### 3.0.5 (Feb 06, 2026)
+
+**Fixes:**
+
+* Fix for cordova-ios 8.0.x
+
 ### 3.0.4 (Oct 27, 2023)
 
 **Fixes:**
