@@ -49,7 +49,10 @@
     } else {
         if (_lastOrientation != UIInterfaceOrientationUnknown) {
             [[UIDevice currentDevice] setValue:[NSNumber numberWithInt:_lastOrientation] forKey:@"orientation"];
-            ((void (*)(CDVViewController*, SEL, NSMutableArray*))objc_msgSend)(vc,selector,result);
+            // Guard: setSupportedOrientations: was removed in cordova-ios 8.0.0
+            if ([vc respondsToSelector:selector]) {
+                ((void (*)(CDVViewController*, SEL, NSMutableArray*))objc_msgSend)(vc,selector,result);
+            }
             [UINavigationController attemptRotationToDeviceOrientation];
         }
     }
@@ -68,7 +71,7 @@
 -(void)handleAboveEqualIos16WithOrientationMask:(NSInteger) orientationMask viewController: (CDVViewController*) vc result:(NSMutableArray*) result selector:(SEL) selector
 {
     NSObject *value;
-    // oritentationMask 15 is "unlock" the orientation lock.
+    // orientationMask 15 is "unlock" the orientation lock.
     if (orientationMask != 15) {
         if (!_isLocked) {
             _lastOrientation = [UIApplication sharedApplication].statusBarOrientation;
@@ -84,10 +87,17 @@
             value = [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:UIInterfaceOrientationMaskPortraitUpsideDown];
         }
     } else {
-        ((void (*)(CDVViewController*, SEL, NSMutableArray*))objc_msgSend)(vc,selector,result);
+        // Guard: setSupportedOrientations: was removed in cordova-ios 8.0.0
+        if ([vc respondsToSelector:selector]) {
+            ((void (*)(CDVViewController*, SEL, NSMutableArray*))objc_msgSend)(vc,selector,result);
+        }
+        // On iOS 16+, explicitly request all orientations to truly unlock.
+        // Without this, cordova-ios 8.0 would silently fail because
+        // setSupportedOrientations: no longer exists on CDVViewController.
+        value = [[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:UIInterfaceOrientationMaskAll];
     }
     if (value != nil) {
-        _isLocked = true;
+        _isLocked = (orientationMask != 15);
         UIWindowScene *scene = (UIWindowScene*)[[UIApplication.sharedApplication connectedScenes] anyObject];
         [scene requestGeometryUpdateWithPreferences:(UIWindowSceneGeometryPreferencesIOS*)value errorHandler:^(NSError * _Nonnull error) {
             NSLog(@"Failed to change orientation  %@ %@", error, [error userInfo]);
@@ -139,21 +149,20 @@
         [result addObject:[NSNumber numberWithInt:UIInterfaceOrientationLandscapeLeft]];
     }
     SEL selector = NSSelectorFromString(@"setSupportedOrientations:");
-    
+
+    // Call setSupportedOrientations: only if CDVViewController still supports it
+    // (cordova-ios < 8.0). On cordova-ios 8.0+ this method was removed.
     if([vc respondsToSelector:selector]) {
         if (orientationMask != 15 || [UIDevice currentDevice] == nil) {
             ((void (*)(CDVViewController*, SEL, NSMutableArray*))objc_msgSend)(vc,selector,result);
         }
+    }
 
-        if ([UIDevice currentDevice] != nil){
-            [self handleWithOrientationMask:orientationMask viewController:vc result:result selector:selector];
-        }
-        
-        pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
+    if ([UIDevice currentDevice] != nil){
+        [self handleWithOrientationMask:orientationMask viewController:vc result:result selector:selector];
     }
-    else {
-        pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_INVALID_ACTION messageAsString:@"Error calling to set supported orientations"];
-    }
+
+    pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
     
     [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
     
